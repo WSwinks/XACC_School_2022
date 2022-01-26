@@ -52,7 +52,7 @@ vadd1:
     //for (int i = 0; i < (elements/16)*16; i++) {
 //#pragma HLS LOOP_TRIPCOUNT avg=4096 max=4096 min=4096
 //#pragma HLS UNROLL factor=16
-        if(in1[i]*in1[i] + in2[i]*in[2] <= 1) out[0]++;
+        if(in1[i]*in1[i] + in2[i]*in2[i] <= 1) out[0]++;
     }
 }
 }
