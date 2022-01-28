@@ -36,23 +36,30 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
         elements (input)     --> Number the elements in the Vector
 */
 
+#include "xf_fintech/rng.hpp"
+
 extern "C" {
-void krnl_simple_monte_carlo(const double* in1, // Read-Only Vector 1
-               const double* in2, // Read-Only Vector 2
-               int* out,       // Output Result
-               int elements    // Number of elements
-          ) {
+
+void krnl_simple_monte_carlo(double* x, // Write-Only Vector 1
+               double* y, 				// Write-Only Vector 2
+               int* out,        		// Output Result
+               int elements,   			// Number of elements
+			   int index				// Vector index where the result is stored
+			) {
 //#pragma HLS INTERFACE mode=m_axi bundle=gmem0 port=in1
 //#pragma HLS INTERFACE mode=m_axi bundle=gmem1 port=in2
 //#pragma HLS INTERFACE mode=m_axi bundle=gmem2 port=out
 
+	xf::fintech::MT19937 uniformRNG(42);
+
 // Simple vector addition kernel.
 vadd1:
     for (int i = 0; i < elements; i++) {
-    //for (int i = 0; i < (elements/16)*16; i++) {
 //#pragma HLS LOOP_TRIPCOUNT avg=4096 max=4096 min=4096
 //#pragma HLS UNROLL factor=16
-        if(in1[i]*in1[i] + in2[i]*in2[i] <= 1) out[0]++;
+    	x[i] = uniformRNG.next();
+    	y[i] = uniformRNG.next();
+        if(x[i]*x[i] +y[i]*y[i] <= 1) out[index]++;
     }
 }
 }

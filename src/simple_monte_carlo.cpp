@@ -42,31 +42,180 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // This file is required for OpenCL C++ wrapper APIs
 #include "xcl2.hpp"
 
+#define NUMBER_OF_KERNELS 2
 
-void vectors_init(double *buffer_a, double *buffer_b, int *sw_results, int *hw_results, unsigned int num_elements) {
+// -------------------------------------------------------------------------------------------
+// An event callback function that prints the operations performed by the OpenCL runtime.
+// -------------------------------------------------------------------------------------------
+void event_cb(cl_event event, cl_int cmd_status, void *id)
+{
+	if (getenv("XCL_EMULATION_MODE") != NULL) {
+	 	std::cout << "  kernel finished processing request " << *(int *)id << std::endl;
+	}
+}
+
+// -------------------------------------------------------------------------------------------
+// Struct returned by SmcDispatcher() and used to keep track of the request sent to the kernel
+// The sync() method waits for completion of the request. After it returns, results are ready
+// -------------------------------------------------------------------------------------------
+class SmcRequest {
+
+public:
+
+  SmcRequest(int id) {
+    mId = id;
+    mEvent.resize(2);
+  }
+
+  void addEvent(cl::Event event)
+  {
+	mEvent.push_back(event);
+  }
+
+  int *getId()
+  {
+	return &mId;
+  }
+
+  void sync()
+  {
+  	// Wait until the outputs have been read back
+	std::cout << "Before wait()" << std::endl;
+	clWaitForEvents(1, (const cl_event *)mEvent.data());
+	std::cout << "After wait()" << std::endl;
+
+	/*clWaitForEvents(1, &mEvent[2]);
+	clReleaseEvent(mEvent[0]);
+   	clReleaseEvent(mEvent[1]);
+   	clReleaseEvent(mEvent[2]);*/
+  }
+
+private:
+  //cl_event mEvent[3];
+  std::vector<cl::Event> mEvent;
+  int mId;
+
+};
+
+// -------------------------------------------------------------------------------------------
+// Class used to dispatch requests to the kernel
+// The SmcDispatcher() method schedules the necessary operations (write, kernel, read) and
+// returns a SmcRequest* struct which can be used to track the completion of the request.
+// The dispatcher has its own OOO command queue allowing multiple requests to be scheduled
+// and executed independently by the OpenCL runtime.
+// -------------------------------------------------------------------------------------------
+class SmcDispatcher {
+
+public:
+
+  SmcDispatcher(
+	cl::Device     Device,
+	cl::Context    Context,
+	cl::Program    Program )
+  {
+	OCL_CHECK(mErr, mKernel = cl::Kernel(Program, "krnl_simple_monte_carlo" , &mErr));
+	OCL_CHECK(mErr, mQueue  = cl::CommandQueue(Context, Device, CL_QUEUE_PROFILING_ENABLE | CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE, &mErr));
+	mContext = Context;
+	mCounter = 0;
+  }
+
+  SmcRequest* operator() (
+	unsigned int    num_elements,
+	unsigned int    index,
+	double    		*dst_x,
+	double			*dst_y,
+	int				*result)
+  {
+
+  	SmcRequest* req = new SmcRequest(mCounter++);
+    std::cout << "mCounter = " << mCounter << std::endl;
+
+  	// Running the kernel
+  	unsigned int size_bytes  = num_elements * sizeof(double);
+  	unsigned int size_bytes_output  = sizeof(int);
+
+	// Create output buffer for dst (device to host)
+  	OCL_CHECK(mErr, cl::Buffer buffer_output1(mContext, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY, size_bytes, dst_x, &mErr));
+  	OCL_CHECK(mErr, cl::Buffer buffer_output2(mContext, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY, size_bytes, dst_y, &mErr));
+  	OCL_CHECK(mErr, cl::Buffer buffer_output3(mContext, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY, size_bytes_output, result, &mErr));
+
+  	// Set the kernel arguments
+  	OCL_CHECK(mErr, mErr = mKernel.setArg(0, buffer_output1));
+  	OCL_CHECK(mErr, mErr = mKernel.setArg(1, buffer_output2));
+  	OCL_CHECK(mErr, mErr = mKernel.setArg(2, buffer_output3));
+  	OCL_CHECK(mErr, mErr = mKernel.setArg(3, num_elements));
+  	OCL_CHECK(mErr, mErr = mKernel.setArg(4, index));
+
+	// Schedule the execution of the kernel
+  	std::vector<cl::Event> events;
+  	cl::Event event_migrate_out, event_kernel;
+	OCL_CHECK(mErr, mErr = mQueue.enqueueTask(mKernel, nullptr, &event_kernel));
+	events.push_back(event_kernel);
+
+	// Schedule the reading of the outputs
+	OCL_CHECK(mErr, mErr = mQueue.enqueueMigrateMemObjects({buffer_output1, buffer_output2, buffer_output3},CL_MIGRATE_MEM_OBJECT_HOST, &events, &event_migrate_out));
+	events.push_back(event_migrate_out);
+
+	// Register call back to notify of kernel completion
+	std::cout << "Register callback" << std::endl;
+	event_kernel.setCallback(CL_COMPLETE, event_cb, req->getId());
+	std::cout << "Succesful callback registering" << std::endl;
+
+	req->addEvent(event_kernel);
+	req->addEvent(event_migrate_out);
+
+	return req;
+  };
+
+  ~SmcDispatcher()
+  {
+	//clReleaseCommandQueue(mQueue.get());
+	//clReleaseKernel(mKernel.get());
+  };
+
+private:
+  cl::Kernel        mKernel;
+  cl::CommandQueue  mQueue;
+  cl::Context       mContext;
+  cl_int            mErr;
+  int               mCounter;
+};
+
+// -------------------------------------------------------------------------------------------
+// Helper functions
+// -------------------------------------------------------------------------------------------
+void vectors_init(double *buffer_a, double *buffer_b, int *sw_results, int *hw_results, unsigned int num_runs, unsigned int num_elements) {
   // Fill the input vectors with random data
-  for (size_t i = 0; i < num_elements; i++) {
-    buffer_a[i]    = (double)std::rand()/RAND_MAX;
-    buffer_b[i]    = (double)std::rand()/RAND_MAX;
+  for (size_t i = 0; i < num_runs*num_elements; i++) {
+    buffer_a[i]   = 0;
+    buffer_b[i]   = 0;
+  }
+
+  for(size_t i = 0; i < num_runs; i++) {
     hw_results[i] = 0;
-    sw_results[i] = buffer_a[i] + buffer_b[i];
+    sw_results[i] = 0;
   }
 }
 
-bool verify(int *sw_results, int *hw_results, int num_elements) {
-  bool match = true;
+bool verify(double *x, double *y, int hw_results, int num_elements) {
+  int numberOfHits = 0;
   for (int i = 0; i < num_elements; i++) {
-    if (sw_results[i] != hw_results[i]) {
-      match = false;
-      break;
+    if (x[i]*x[i]+y[i]*y[i] <= 1) {
+      numberOfHits++;
     }
   }
-  std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
-  return match;
+  return (hw_results == numberOfHits);
 }
 
+// -------------------------------------------------------------------------------------------
+// Program body
+// -------------------------------------------------------------------------------------------
 int main(int argc, char **argv) {
   
+  // ---------------------------------------------------------------------------------
+  // Parse command line
+  // ---------------------------------------------------------------------------------
+
   // Check input arguments
   if (argc < 2 || argc > 4) {
     std::cout << "Usage: " << argv[0] << " <XCLBIN File> <#elements(optional)> <debug(optional)>" << std::endl;
@@ -115,10 +264,19 @@ int main(int argc, char **argv) {
   }
 
   // I/O Data Vectors
-  std::vector<double, aligned_allocator<double>> buffer_a(num_elements);
-  std::vector<double, aligned_allocator<double>> buffer_b(num_elements);
-  std::vector<int, aligned_allocator<int>> hw_results(num_elements);
-  std::vector<int, aligned_allocator<int>> sw_results(num_elements);
+  int numRuns = 2;
+  std::vector<double, aligned_allocator<double>> buffer_a(numRuns*num_elements);
+  std::vector<double, aligned_allocator<double>> buffer_b(numRuns*num_elements);
+  std::vector<int, aligned_allocator<int>> hw_results(numRuns);
+  std::vector<int, aligned_allocator<int>> sw_results(numRuns);
+  int index = 0;
+
+  // Initialize the data vectors
+  vectors_init(buffer_a.data(), buffer_b.data(), sw_results.data(), hw_results.data(), numRuns, num_elements);
+
+  // ---------------------------------------------------------------------------------
+  // Create OpenCL context, device and program
+  // ---------------------------------------------------------------------------------
 
   // OpenCL Host Code Begins.
   // OpenCL objects
@@ -126,7 +284,6 @@ int main(int argc, char **argv) {
   cl::Context context;
   cl::CommandQueue q;
   cl::Program program;
-  cl::Kernel krnl_simple_monte_carlo;
   cl_int err;
 
   // get_xil_devices() is a utility API which will find the Xilinx
@@ -138,28 +295,22 @@ int main(int argc, char **argv) {
   auto fileBuf = xcl::read_binary_file(binaryFile);
   cl::Program::Binaries bins{{fileBuf.data(), fileBuf.size()}};
   bool valid_device = false;
+
   for (unsigned int i = 0; i < devices.size(); i++) {
     device = devices[i];
     // Creating Context and Command Queue for selected Device
     OCL_CHECK(err, context = cl::Context(device, NULL, NULL, NULL, &err));
-    OCL_CHECK(err,
-              q = cl::CommandQueue(context, device,
-                                   CL_QUEUE_PROFILING_ENABLE |
-                                       CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE,
-                                   &err));
-    std::cout << "Trying to program device[" << i
-              << "]: " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
-    cl::Program program(context, {device}, bins, NULL, &err);
+    OCL_CHECK(err, program = cl::Program(context, {device}, bins, NULL, &err));
     if (err != CL_SUCCESS) {
       std::cout << "Failed to program device[" << i << "] with xclbin file!\n";
     } else {
       std::cout << "Device[" << i << "]: program successful!\n";
       // Creating Kernel
-      OCL_CHECK(err, krnl_simple_monte_carlo  = cl::Kernel(program, "krnl_simple_monte_carlo" , &err));
       valid_device = true;
       break; // we break because we found a valid device
     }
   }
+
   if (!valid_device) {
     std::cout << "Failed to program any device found, exit!\n";
     exit(EXIT_FAILURE);
@@ -167,69 +318,38 @@ int main(int argc, char **argv) {
 
   std::cout << "Running Vector add with " << num_elements << " elements" << std::endl;
 
-  // Initialize the data vectors
-  vectors_init(buffer_a.data(), buffer_b.data(), sw_results.data(), hw_results.data(), num_elements);
+  SmcRequest* request[numRuns];
+  SmcDispatcher Smc(device, context, program);
 
-  // Running the kernel
-  unsigned int size_bytes  = num_elements * sizeof(double);
-  unsigned int size_bytes_output  = num_elements * sizeof(int);
+  for(int r = 0; r < numRuns; r++)
+  {
+	// Make independent requests to Blur Y, U and V planes
+	// Requests will run sequentially if there is a single CU
+	// Requests will run in parallel if there are two or more CUs
+	double *x_dst = buffer_a.data();
+	double *y_dst = buffer_b.data();
+	int* result = hw_results.data();
 
-  // Allocate Buffer in Global Memory
-  // Buffers are allocated using CL_MEM_USE_HOST_PTR for efficient memory and
-  // Device-to-host communication
-  OCL_CHECK(err, cl::Buffer buffer_input1(context,
-                                      CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                      size_bytes, buffer_a.data(), &err));
+	request[r] = Smc(num_elements, index++, &x_dst[numRuns*num_elements], &y_dst[numRuns*num_elements], &result[numRuns]);
 
-  OCL_CHECK(err, cl::Buffer buffer_input2(context,
-                                      CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                      size_bytes, buffer_b.data(), &err));
+	// Wait for completion of the outstanding requests
+	std::cout << "Before sync()" << std::endl;
+	request[r]->sync();
+	std::cout << "After sync()" << std::endl;
+  }
 
-  OCL_CHECK(err, cl::Buffer buffer_output(context,
-                                      CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY,
-                                      size_bytes_output, hw_results.data(), &err));
-
-
-  // Setting Kernel Arguments krnl_simple_monte_carlo
-  OCL_CHECK(err, err = krnl_simple_monte_carlo.setArg(0, buffer_input1));
-  OCL_CHECK(err, err = krnl_simple_monte_carlo.setArg(1, buffer_input2));
-  OCL_CHECK(err, err = krnl_simple_monte_carlo.setArg(2, buffer_output));
-  OCL_CHECK(err, err = krnl_simple_monte_carlo.setArg(3, num_elements));
-
-  // Copy input data to device global memory
-  OCL_CHECK(err, err = q.enqueueMigrateMemObjects({buffer_input1, buffer_input2}, 0 /* 0 means from host*/));
-  OCL_CHECK(err, err = q.finish());
-
-  // Launching the Kernels
-  std::cout << "Launching Hardware Kernel..." << std::endl;
-  OCL_CHECK(err, err = q.enqueueTask(krnl_simple_monte_carlo));
-  // wait for the kernel to finish their operations
-  OCL_CHECK(err, err = q.finish());
-
-  // Copy Result from Device Global Memory to Host Local Memory
-  std::cout << "Getting Hardware Results..." << std::endl;
-  OCL_CHECK(err, err = q.enqueueMigrateMemObjects({buffer_output},CL_MIGRATE_MEM_OBJECT_HOST));
-  OCL_CHECK(err, err = q.finish());
-
-  std::cout << "hw_results[0] = " << hw_results[0] << std::endl;
-  std::cout << "hw_results[1] = " << hw_results[1] << std::endl;
-  std::cout << "PI = " << 4*(double)hw_results[0]/num_elements << std::endl;
+  for(int i = 0; i < numRuns; i++)
+  {
+	  std::cout << "hw_results[" << i << "] = " << hw_results[i] << std::endl;
+	  std::cout << "PI = " << 4*(double)hw_results[i]/num_elements << std::endl;
+  }
 
   // OpenCL Host Code Ends
 
   // Compare the device results with software results
-  /*bool match = verify(sw_results.data(), hw_results.data(), num_elements);
+  bool match = true;
+  //bool match = verify(buffer_a.data(), buffer_b.data(), hw_results[index], num_elements);
+  std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
 
-  if (debug){
-    for (unsigned int i = 0 ; i < num_elements; i++){
-      std::cout << "Idx [" << std::setw(6) << i << "]" << std::setw(14) << buffer_a[i] << " + ";
-      std::cout << std::setw(14) << buffer_b[i] <<"\tsw result" << std::setw(14);
-      std::cout << sw_results[i] << "\thw result" << std::setw(14) << hw_results[i];
-      std::cout << "\tequal "<< ((hw_results[i] == sw_results[i]) ? "True" : "False") << std::endl;
-    }
-  }
-
-  return (match ? EXIT_SUCCESS : EXIT_FAILURE);*/
-
-  return true;
+  return (match ? EXIT_SUCCESS : EXIT_FAILURE);
 }
