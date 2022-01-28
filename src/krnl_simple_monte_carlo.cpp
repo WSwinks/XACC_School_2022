@@ -59,7 +59,7 @@ vadd1:
 //#pragma HLS UNROLL factor=16
     	x[i] = uniformRNG.next();
     	y[i] = uniformRNG.next();
-        if(x[i]*x[i] +y[i]*y[i] <= 1) out[index]++;
+        if(x[i]*x[i] +y[i]*y[i] <= 1) out[0]++;
     }
 }
 }

@@ -64,7 +64,6 @@ public:
 
   SmcRequest(int id) {
     mId = id;
-    mEvent.resize(2);
   }
 
   void addEvent(cl::Event event)
@@ -81,13 +80,23 @@ public:
   {
   	// Wait until the outputs have been read back
 	std::cout << "Before wait()" << std::endl;
-	clWaitForEvents(1, (const cl_event *)mEvent.data());
+	cl_int mErr;
+	OCL_CHECK(mErr, mErr = mEvent.at(0).wait());
+	//clWaitForEvents(1, (const cl_event *)mEvent.data());
 	std::cout << "After wait()" << std::endl;
+
 
 	/*clWaitForEvents(1, &mEvent[2]);
 	clReleaseEvent(mEvent[0]);
    	clReleaseEvent(mEvent[1]);
    	clReleaseEvent(mEvent[2]);*/
+
+
+	cl_event *kernel_event = (cl_event *)mEvent.data();
+	cl_event *migrate_out_event = (cl_event *)&mEvent.data()[1];
+
+	clReleaseEvent(*kernel_event);
+	clReleaseEvent(*migrate_out_event);
   }
 
 private:
@@ -139,6 +148,8 @@ public:
   	OCL_CHECK(mErr, cl::Buffer buffer_output2(mContext, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY, size_bytes, dst_y, &mErr));
   	OCL_CHECK(mErr, cl::Buffer buffer_output3(mContext, CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY, size_bytes_output, result, &mErr));
 
+  	std::cout << "Output buffers created" << std::endl;
+
   	// Set the kernel arguments
   	OCL_CHECK(mErr, mErr = mKernel.setArg(0, buffer_output1));
   	OCL_CHECK(mErr, mErr = mKernel.setArg(1, buffer_output2));
@@ -148,7 +159,7 @@ public:
 
 	// Schedule the execution of the kernel
   	std::vector<cl::Event> events;
-  	cl::Event event_migrate_out, event_kernel;
+	cl::Event event_migrate_out, event_kernel;
 	OCL_CHECK(mErr, mErr = mQueue.enqueueTask(mKernel, nullptr, &event_kernel));
 	events.push_back(event_kernel);
 
@@ -158,7 +169,7 @@ public:
 
 	// Register call back to notify of kernel completion
 	std::cout << "Register callback" << std::endl;
-	event_kernel.setCallback(CL_COMPLETE, event_cb, req->getId());
+	OCL_CHECK(mErr, mErr = event_kernel.setCallback (CL_COMPLETE, event_cb, req->getId()));
 	std::cout << "Succesful callback registering" << std::endl;
 
 	req->addEvent(event_kernel);
@@ -166,6 +177,11 @@ public:
 
 	return req;
   };
+
+  void queueFinish()
+  {
+	  mQueue.finish();
+  }
 
   ~SmcDispatcher()
   {
@@ -265,14 +281,29 @@ int main(int argc, char **argv) {
 
   // I/O Data Vectors
   int numRuns = 2;
+  /*
   std::vector<double, aligned_allocator<double>> buffer_a(numRuns*num_elements);
   std::vector<double, aligned_allocator<double>> buffer_b(numRuns*num_elements);
   std::vector<int, aligned_allocator<int>> hw_results(numRuns);
   std::vector<int, aligned_allocator<int>> sw_results(numRuns);
-  int index = 0;
 
   // Initialize the data vectors
   vectors_init(buffer_a.data(), buffer_b.data(), sw_results.data(), hw_results.data(), numRuns, num_elements);
+  */
+
+  std::vector<double, aligned_allocator<double>> buffer_a1(num_elements);
+  std::vector<double, aligned_allocator<double>> buffer_b1(num_elements);
+  std::vector<int, aligned_allocator<int>> hw_results1(1);
+  std::vector<int, aligned_allocator<int>> sw_results1(1);
+  vectors_init(buffer_a1.data(), buffer_b1.data(), sw_results1.data(), hw_results1.data(), 1, num_elements);
+
+  std::vector<double, aligned_allocator<double>> buffer_a2(num_elements);
+  std::vector<double, aligned_allocator<double>> buffer_b2(num_elements);
+  std::vector<int, aligned_allocator<int>> hw_results2(1);
+  std::vector<int, aligned_allocator<int>> sw_results2(1);
+  vectors_init(buffer_a2.data(), buffer_b2.data(), sw_results2.data(), hw_results2.data(), 1, num_elements);
+
+  int index = 0;
 
   // ---------------------------------------------------------------------------------
   // Create OpenCL context, device and program
@@ -321,7 +352,7 @@ int main(int argc, char **argv) {
   SmcRequest* request[numRuns];
   SmcDispatcher Smc(device, context, program);
 
-  for(int r = 0; r < numRuns; r++)
+  /*for(int r = 0; r < numRuns; r++)
   {
 	// Make independent requests to Blur Y, U and V planes
 	// Requests will run sequentially if there is a single CU
@@ -330,26 +361,42 @@ int main(int argc, char **argv) {
 	double *y_dst = buffer_b.data();
 	int* result = hw_results.data();
 
-	request[r] = Smc(num_elements, index++, &x_dst[numRuns*num_elements], &y_dst[numRuns*num_elements], &result[numRuns]);
+	request[r] = Smc(num_elements, index++, &x_dst[r*num_elements], &y_dst[r*num_elements], &result[r]);
 
 	// Wait for completion of the outstanding requests
 	std::cout << "Before sync()" << std::endl;
 	request[r]->sync();
 	std::cout << "After sync()" << std::endl;
-  }
+  }*/
 
-  for(int i = 0; i < numRuns; i++)
+  request[0] = Smc(num_elements, 0, buffer_a1.data(), buffer_b1.data(), hw_results1.data());
+
+  // Wait for completion of the outstanding requests
+  std::cout << "Before sync()" << std::endl;
+  request[0]->sync();
+  std::cout << "After sync()" << std::endl;
+
+  /*request[1] = Smc(num_elements, 0, buffer_a2.data(), buffer_b2.data(), hw_results2.data());
+
+  // Wait for completion of the outstanding requests
+  std::cout << "Before sync()" << std::endl;
+  request[1]->sync();
+  std::cout << "After sync()" << std::endl;*/
+
+  //Smc.queueFinish();
+
+  /*for(int i = 0; i < numRuns; i++)
   {
 	  std::cout << "hw_results[" << i << "] = " << hw_results[i] << std::endl;
 	  std::cout << "PI = " << 4*(double)hw_results[i]/num_elements << std::endl;
-  }
+  }*/
 
   // OpenCL Host Code Ends
 
   // Compare the device results with software results
-  bool match = true;
-  //bool match = verify(buffer_a.data(), buffer_b.data(), hw_results[index], num_elements);
-  std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
+  //bool match = true;
+  bool match = verify(buffer_a1.data(), buffer_b1.data(), hw_results1[0], num_elements);
+  //std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
 
   return (match ? EXIT_SUCCESS : EXIT_FAILURE);
 }
